@@ -1,0 +1,132 @@
+MODULE ALU
+Title 'ALU'
+
+
+" Description:  This module is the logic for the Caltech10 CPU's arithmetic 
+"               logic unit. It implements the logical and arithmetic 
+"               instructions for the Caltech10 CPU, as well as the updating of 
+"               the accumulator. Includes setting all ALU flags. Note that the 
+"               flags are implemented as follows: bit 7 - Zero Flag, bit 6 - 
+"               sign flag, bit 5 - Overflow, bit 4 - Carry. Bits 3-0 are not 
+"               changed by the ALU and include the direction and interrupt flags 
+"
+" Inputs:       Data7..Data0 - 8 bits of input data for operand input 
+"               
+"               ZAdd - Selects 0 as one input to the ALU adder
+"               F3..F0 - F block signals used to select a logical operation
+"               SZHold - If high, does not allow sign or zero flags to change 
+"               CVHold - If high, do not allow carry or overflow flag to change 
+"               CinA - Carry in to the adder on the low bit of A 
+"               CinB - Carry in to the adder on the low bit of B 
+"               Popf - Indicates the flags should be updated from the data input 
+"               AccHold - Does not allow accumulator to change 
+"               InvertC - Inverts the carry flag before setting 
+"
+"               Reset - Input system reset
+"               Clock - Input system clock
+"
+" Outputs:      Accum7..Accum0 - 8 bit accumulator
+"               Flags7..Flags0 - The flags register for outputting ALU flags 
+
+
+" Revision History:
+" 02/23/23   Edward Speer  Initial Revision 
+" 02/23/23   Edward Speer  Implement F block and adder
+" 02/23/23   Edward Speer  Implement flags and update accumulator
+" 03/11/23   Edward Speer  Update flags to support PUSH FF -> AF 
+" 03/15/23   Edward Speer  Remove ZAdd from equation for Flags2 
+
+
+
+" Pin/Signal Declarations 
+
+" Inputs 
+
+Data7..Data0   pin;              "8 bit data input 
+
+ZAdd           pin;              "Selects 0 as one input to adder 
+F3..F0         pin;              "Selection signals on the F block 
+SZHold         pin;              "Holds sign and carry flags 
+CVHold         pin;              "Holds carry and overflow flags 
+CinA           pin;              "Carry in on low bit of adder in A 
+CinB           pin;              "Carry in on high bit of adder in B 
+Popf           pin;              "Update flags from data bus 
+AccHold        pin;              "Hold value of accumulator 
+InvertC        pin;              "Inverts carry before setting 
+
+Reset          pin;              "System reset signal
+Clock          pin;              "System clock signal
+
+"Outputs
+
+Accum7..Accum0 pin ISTYPE 'REG'; "CPU accumulator 
+Flags7..Flags0 pin ISTYPE 'REG'; "Flag Register 
+
+" Intermediate Terms
+
+CinLow        node ISTYPE 'COM'; "Low carry in bit for adder 
+FOut7..FOut0  node ISTYPE 'COM'; "Output from the F block
+COut7..COut0  node ISTYPE 'COM'; "Carry out bus for adder 
+Cin7..Cin0    node ISTYPE 'COM'; "Carry in bus for adder 
+A7..A0        node ISTYPE 'COM'; "Operand A into the adder 
+Sum7..Sum0    node ISTYPE 'COM'; "Output of adder
+
+" Buses
+
+Data = [Data7..Data0];
+Accumulator = [Accum7..Accum0];
+Flags = [Flags7..Flags0];
+FOut = [FOut7..FOut0];
+COut = [COut7..COut0];
+Cin = [Cin7..Cin0];
+A = [A7..A0];
+Sum = [Sum7..Sum0];
+
+EQUATIONS
+
+" Clock and active low resets for the accumulator and Flags register 
+
+Accumulator.CLK = Clock;
+Flags.CLK = Clock;
+Accumulator.CLR = !Reset;
+Flags.CLR = !Reset;
+
+" F-block is implemented as a special 4:1 with controls as inputs 
+FOut = (F3 & (Accumulator & Data)) #    "1000 -> A&B 
+       (F2 & (Accumulator & !Data)) #   "0100 -> A&!B 
+       (F1 & (!Accumulator & Data)) #   "0010 -> !A&B
+       (F0 & (!Accumulator & !Data)) #  "0001 -> !A&!B
+       (F3 & F2 & F1 & F0); 
+
+"Note that therefore, 0110 -> A$B, 1110 -> A$B, 0011 -> !A, 0101 -> !B, 
+"1100 -> A, 1010 -> B
+
+A = !ZAdd & Accumulator;                "If ZAdd high, send 0 into adder
+
+" Select the value of the low CarryIn via this mux:
+CinLow = (!CinA & !CinB & 0) #          "00 -> 0
+         (!CinA & CinB & 1) #           "01 -> 1
+         (CinA & !CinB & !Flags3) #     "10 -> !C
+         (CinA & CinB & Flags3);       "11 -> C
+
+" Add operand A and FOut using 8 bit adder
+COut = (A & FOut) # (Cin & (A $ FOut));
+Cin = [COut6..COut0, CinLow];           "Cin[i] = COut[i-1], Cin[0] set by mux 
+Sum =  A $ FOut $ Cin;
+
+"Set flags based on the Sum 
+Flags := (!Popf & [Flags7, 0, Flags5, 0, 
+         (!CVHold & !InvertC & COut7) #
+         (!CVHold & InvertC & !COut7) #
+         (CVHold & Flags3), 
+         (!CVHold & (COut6 $ COut7)) #
+         (CVHold & Flags2), 
+         (!SZHold & Sum7) # 
+         (SZHold & Flags1), 
+         (!SZHold & !Sum7 & !Sum6 & !Sum5 & !Sum4 & !Sum3 & !Sum2 & !Sum1 & !Sum0)
+         # (SZHold & Flags0)]) 
+          # (Popf & Data);
+
+Accumulator := (!AccHold & Sum) # (AccHold & Accumulator);
+
+END ALU

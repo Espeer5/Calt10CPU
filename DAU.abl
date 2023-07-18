@@ -1,0 +1,130 @@
+ MODULE DataAccess
+TITLE 'Data Access Unit'
+
+
+" Description:  This module is the data memeory access unit for the Caltech10 
+"               CPU. It contains the logic for updating the X and S registers, 
+"               generating data addresses, and updating X and S registers while 
+"               selecting pre-post increment/decrement instructions.
+"
+" Inputs:       Accum[7..0]    - 8 bit CPU accumulator
+"               Offset[7..0]   - 8 bit offset input 
+"               AS[1..0]       - Select signals on address source mux
+"               PrePostSelect  - Select on pre-post mux
+"               OffS           - Select signals on offset source mux
+"               IDS[1..0]      - Increment/Decrement selection signals 
+"               UpdateX        - Update the X Register 
+"               UpdateS        - Update the S Register 
+"               Reset          - system reset in
+"               Clock          - system clock in
+"
+" Outputs:      DataAddr[7..0] - Calculated data address out 
+"               XReg[7..0]     - 8 bit X register 
+"               SReg[7..0]     - 8 bit S register 
+
+
+" Revision History:
+" 03/01/2023  Edward Speer  Initial Revision
+" 03/01/2023  Edward Speer  add intermediates for I/D adder 
+" 03/01/2023  Edward Speer  Add comments
+" 03/01/2023  Edward Speer  Correct typos in signal names 
+
+
+" Pin/Signal Declarations
+
+" Inputs 
+
+Accum7..Accum0        pin;     "Input 8 bit system accumulator
+Offset7..Offset0      pin;     "Input 8 bit offset 
+AS1..AS0              pin;     "Select signals on address select mux 
+PrePostSelect         pin;     "Select signal on pre-post mux 
+OffS                  pin;     "Select signal on offset select mux
+IDS1..IDS0            pin;     "Select signals on Incrementer/decrementer 
+UpdateX               pin;     "Update the X register 
+UpdateS               pin;     "Update the S register
+
+Reset                 pin;     "Input system reset
+Clock                 pin;     "Input system clock 
+
+" Outputs
+
+DataAddr7..DataAddr0  pin;                 "Calculated data address out 
+XReg7..XReg0          pin ISTYPE 'REG';    "8 bit X Register 
+SReg7..SReg0          pin ISTYPE 'REG';    "8 bit S Register 
+
+" Intermediate Terms
+
+AddSrc7..AddSrc0      node ISTYPE 'COM';   "Output of Addres source mux 
+IncDec7..IncDec0      node ISTYPE 'COM';   "Output of inc/dec
+PrePost7..PrePost0    node ISTYPE 'COM';   "Output of Pre/Post mux 
+OffSrc7..OffSrc0      node ISTYPE 'COM';   "Output of Offset source mux 
+CIn7..CIn0            node ISTYPE 'COM';   "Carry in of adder 
+COut7..COut0          node ISTYPE 'COM';   "Carry out of adder
+IncDecIn7..IncDecIn0  node ISTYPE 'COM';   "inc/dec adder input constant
+IncDecCI7..IncDecCI0  node ISTYPE 'COM';   "inc/dec adder CIn 
+IncDecCO7..IncDecCO0  node ISTYPE 'COM';   "inc/dec adder COut 
+
+" Buses 
+Accum = [Accum7..Accum0];
+DataAddr = [DataAddr7..DataAddr0];         "8 bit calculated address bus 
+XReg = [XReg7..XReg0];                     "X register
+SReg = [SReg7..SReg0];                     "S Register 
+Offset = [Offset7..Offset0];               "8 bit offset
+AddSrc = [AddSrc7..AddSrc0];               "8 bit address from selected source 
+IncDec = [IncDec7..IncDec0];               "8 bit inc/dec output
+PrePost = [PrePost7..PrePost0];            "8 bit selected pre/post inc/dec 
+OffSrc = [OffSrc7..OffSrc0];               "8 bit selected offset source 
+CIn = [CIn7..CIn0];                        "8 bit adder carry in 
+COut = [COut7..COut0];                     "8 bit carry out of adder
+IncDecIn = [IncDecIn7..IncDecIn0];         "Constant input into inc/dec adder
+IncDecCI = [IncDecCI7..IncDecCI0];         "Carry in for inc/dec adder
+IncDecCO = [IncDecCO7..IncDecCO0];         "Carry out for inc/dec adder
+
+" Constants
+ZERO = [0, 0, 0, 0, 0, 0, 0, 0];           "8 bit value of 0 
+ONE = [0, 0, 0, 0, 0, 0, 0, 1];            "8 bit value of 1 
+NEG_ONE = [1, 1, 1, 1, 1, 1, 1, 1];        "8 bit value of 1 
+
+EQUATIONS 
+
+" Clock and active low reset for X and S registers
+
+XReg.CLK = Clock;
+XReg.CLR = !Reset;
+SReg.CLK = Clock;
+SReg.CLR = !Reset;
+
+" Use a 4x1 mux to select the address source
+
+AddSrc = (AS1 & AS0 & XReg) #               "11 -> XReg 
+         (AS1 & !AS0 & SReg) #              "10 -> SReg 
+         (!AS1 & AS0 & Accum);              "01 -> Accumulator 
+                                            "00 -> 0 
+
+" The incrementer/decrementer consists of a mux to select 0, 1, -1, and an adder 
+IncDecIn = (IDS1 & IDS0 & ONE) #            "11 -> 1
+           (IDS1 & !IDS0 & NEG_ONE);        "10 -> -1
+" Note that any unused combination of signals will result in 0 (i.e 00 -> 0)
+
+" Inc Dec 8 bit adder 
+IncDecCO = (AddSrc & IncDecIn) # (IncDecCI & (AddSrc $ IncDecIn));
+IncDecCI = [IncDecCO6..IncDecCO0, 0];
+IncDec = AddSrc $ IncDecIn $ IncDecCI;
+
+"Select the pre/post inc/dec out to adder with 2x1 mux 
+PrePost = (PrePostSelect & AddSrc) #        "1-> Pre 
+          (!PrePostSelect & IncDec);        "0 -> Post 
+
+" Use a 2x1 mux to select the offset source 
+OffSrc = (OffS & Offset);  "1-> offset, 0->0
+
+" 8 bit adder to calculate data address bus 
+COut = (PrePost & OffSrc) # (CIn & (PrePost $ OffSrc));
+CIn = [COut6..COut0, 0];
+DataAddr = PrePost $ OffSrc $ CIn;
+
+"Use output of inc/dec to update X or S register 
+XReg := (UpdateX & IncDec) # (!UpdateX & XReg);
+SReg := (UpdateS & IncDec) # (!UpdateS & SReg);
+
+END DataAccess

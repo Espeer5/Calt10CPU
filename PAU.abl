@@ -1,0 +1,104 @@
+MODULE ProgramAccess
+TITLE 'Program Address Unit'
+
+
+" Description:  This module is the logic for the program address unit for the
+"               Caltech10 CPU. It matches the interface given in the PAUDemo
+"               module. This address unit contains all program counter updating
+"               logic, including the arithmetic logic for computing relative
+"               addresses for jumping instructions. 
+"
+" Inputs:       Offset[7..0] - an 8 digit offset for relative addressing
+"               Direct[12..0] - A 13 bit direct address input
+"               Load - Signals whether to update current PC or add to 0
+"               MuxS[2..0] - 3 controls for input select to add to PC
+"               PCHold - Does not allow the PC to change if high
+"               Reset - input system reset
+"               Clock - system clock
+"
+" Outputs:      ProgAddr[12..0] - 13 bit program address bus
+"               PC[12..0] - current program counter value
+
+
+" Revision History:
+" 02/15/23   Edward Speer  Initial Revision
+" 02/15/23   Edward Speer  Handle stack input in mux
+" 02/15/23   Edward Speer  Update comments
+" 02/15/23   Edward Speer  Update CarryIn logic
+" 02/16/23   Edward Speer  Set ProgAddr bus for output
+
+
+" Pin/Signal Declarations
+
+" Inputs
+
+Offset7..Offset0         pin;                    "Relative address input
+Direct12..Direct0        pin;                    "Direct address input
+MuxS2..MuxS0             pin;                    "Source select on mux
+Load                     pin;                    "Signals update from current PC
+
+Reset                    pin;                    "System reset in
+Clock                    pin;                    "Input system clock 
+
+" Outputs
+
+ProgAddr12..ProgAddr0    pin;                    "13 bit program address bus
+PC12..PC0                pin ISTYPE 'REG KEEP';  "13 bit current program counter
+
+" Intermediate Terms
+
+ExtOffset12..ExtOffset0  node ISTYPE 'COM';       "node 8->13 bit extend offset
+MuxOut12..MuxOut0        node ISTYPE 'COM';       "node 13x4:1 mux output
+Sum12..Sum0              node ISTYPE 'COM';       "node sum to update PC
+CarryOut12..CarryOut0    node ISTYPE 'COM';       "node carryOut bus for adder
+CarryIn12..CarryIn0      node ISTYPE 'COM';       "node carryIn bus for adder
+
+" Buses
+
+" Sign extend the 8 bit offset to 13 bit offset
+ExtOffset = [Offset7, Offset7, Offset7, Offset7, Offset7, Offset7..Offset0];
+
+Direct = [Direct12..Direct0];
+Sum = [Sum12..Sum0];
+MuxOut = [MuxOut12..MuxOut0];
+CarryOut = [CarryOut12..CarryOut0];
+CarryIn = [CarryIn12..CarryIn0];
+ProgAddr = [ProgAddr12..ProgAddr0];
+PC = [PC12..PC0];
+
+"Sign extend low 8 bits and high 5 bits popped from stack to add to PC
+Stack1 = [0, 0, 0, 0, 0, Offset7..Offset0];       "low 8 bits from stack
+Stack2 = [Offset4..Offset0, 0, 0, 0, 0, 0, 0, 0, 0]; "high 5 bits from stack
+
+" Constants
+ONE = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];    "13 bit value of 1
+
+EQUATIONS
+
+"clock for program counter
+
+PC.CLK = Clock;
+PC.CLR = Reset;
+
+" Program Memory Access unit - uses a mux to select between multiple sources, 
+" and then either arithmetically changes the program counter according to that
+" source, or directly sets the program counter to a directly specified address
+
+" 13x3:1 mux for selecting the input source to update counter with
+MuxOut = (Direct & MuxS2 & MuxS1 & !MuxS0) #       "sel = 110 -> Direct 
+         (ExtOffset & MuxS2 & !MuxS1 & !MuxS0) #   "sel = 100 -> Offset
+         (Stack1 & !MuxS2 & !MuxS1 & !MuxS0) #    "sel = 000 -> Stack1 
+         (Stack2 & !MuxS2 & !MuxS1 & MuxS0) #      "sel = 001 -> Stack2 
+         (ONE & MuxS2 & MuxS1 & MuxS0);            "sel = 111 -> 1
+
+"Note that any unlisted select signal to the mux will select a 0 (i.e sel=011)
+
+"13 bit adder to calculate new PC value 
+Sum = MuxOut $ (PC & Load) $ CarryIn;
+CarryOut = (MuxOut & PC & Load) # (CarryIn & (MuxOut $ (PC & Load)));
+CarryIn = [CarryOut11..CarryOut0, 0];
+
+PC := Sum;                                         "If PCHold is high, PC=PC
+ProgAddr = Sum;                                    "Program Address Bus out
+
+END ProgramAccess

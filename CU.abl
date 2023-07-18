@@ -1,0 +1,3697 @@
+MODULE CU
+TITLE 'Caltech10 CPU Control Unit'
+
+" Description:  This is the control unit for the Caltech10 CPU, containing all 
+"               the logic for decoding the instruction register, and 
+"               generating control signals for the PAU, DAU, and ALU for the
+"               CPU.
+"
+" Inputs:       Flags[7..0]      - The 8 flag bits for the CPU
+"               ProgramDB[15..0] - 16-bit program data bus holding instruction 
+"               Reset            - System Reset In 
+"               Clock            - System Clock in 
+"
+" Outputs:      MuxS[2..0]       - Source select for PAU mux 
+"               Load             - Load signal for PC in PAU 
+"               AS[1..0]         - Address source select for DAU 
+"               PrePostSelect    - Pre/Post select for DAU incrementer
+"               OffS             - Offset source select for DAU 
+"               IDS[1..0]        - Increment/Decrement select for DAU 
+"               UpdateX          - Update or hold value in X Register 
+"               UpdateS          - Update or hold value in S Register 
+"               ZAdd             - Select acc or 0 as ALU input 
+"               F[3..0]          - Select F-Block output for ALU 
+"               SZHold           - Hold the current value of S and Z flags 
+"               CVHold           - Hold the current value of the C and V flags 
+"               CinA             - Carry in select for ALU Cin mux 
+"               CinB             - Carry in select2 for ALU Cin mux 
+"               Popf             - Indicates if the instr is a popf for the ALU 
+"               AccHold          - Hold the current value of the accumulator 
+"               InvertC          - Invert the carry flag
+"               PAUOffS          - Offset select for PAU 
+"               DDBS[1..0]       - Data Databus source selection 
+"               RD               - Read signal 
+"               WR               - Write signal 
+"               IO               - IO Signal
+"               OffOut[12..0]    - 13 bit address from instruction
+"               ALUS[1..0]       - ALU input selection signals
+
+
+" Revision History:
+" 3/9/23   Edward Speer  Initial Revision
+" 3/9/23   Edward Speer  Add documentation for all control signals
+" 3/9/23   Edward Speer  Add equations for setting control signals 
+" 3/9/23   Edward Speer  Define all constants 
+" 3/11/23  Edward Speer  Debug control signals
+" 3/11/23  Edward Speer  Update Comments
+" 3/15/23  Edward Speer  Create Mealy State machine for CALL/RTS Instructions
+" 3/15/23  Edward Speer  Debug CALL/RTS Instruction control signals 
+" 3/15/23  Edward Speer  Debug NEG extra credit control signals
+
+" Pin/Signal Declarations
+
+" Inputs 
+
+Flags7..Flags0           pin; "System ALU Flags 
+ProgramDB15..ProgramDB0  pin; "Data Bus input
+Reset                    pin; "System Reset in 
+Clock                    pin; "System Clock in
+
+" Outputs 
+
+MuxS2..MuxS0             pin; "Source select for PAU mux 
+Load                     pin; "Load signal for PC in PAU 
+AS1..AS0                 pin; "Address source select for DAU 
+PrePostSelect            pin; "pre/post select for DAU incrementer/decrementer 
+OffS                     pin; "Offset source select for DAU 
+IDS1..IDS0               pin; "Increment/Decrement select for DAU 
+UpdateX                  pin; "Update or hold value of X register 
+UpdateS                  pin; "Update or hold value of S register 
+ZAdd                     pin; "Select Acc or 0 as ALU input 
+F3..F0                   pin; "Select signals for ALU F-block 
+SZHold                   pin; "Hold value of S and Z flags 
+CVHold                   pin; "Hold value of C and V flags 
+CinA                     pin; "CarryIn for operand A of ALU 
+CinB                     pin; "CarryIn for operand B of ALU
+Popf                     pin; "Indicates a popf instruction to the ALU 
+AccHold                  pin; "Holds the current value of the accumulator 
+InvertC                  pin; "Invert the carry flag
+PAUOffS                  pin; "PAU offset selection signal 
+DDBS1..DDBS0             pin; "Data Databus selection signals
+RD                       pin; "Read Signal 
+WR                       pin; "Write Signal 
+OffOut12..OffOut0        pin; "13 bit offset out
+ALUS1..ALUS0             pin; "ALU input selection signals
+IR15..IR0                pin ISTYPE 'REG'; "Instruction Register
+IO                       pin; "I/O signal
+
+" State bits 
+CycleS1..CycleS0         pin ISTYPE 'REG'; "Indicates cycle 1-4 for instr
+in_RTS                   pin ISTYPE 'REG'; "Indicates RTS instruction occurring
+in_CALL                  pin ISTYPE 'REG'; "Indicates CALL instruction occurring
+
+" Busses
+
+Status = [CycleS1..CycleS0, in_RTS, in_CALL];  "State bus for state machine
+Flags = [Flags7..Flags0];              "8 bit flag register
+ProgramDB = [ProgramDB15..ProgramDB0]; "16 bit program databus
+IR = [IR15..IR0];                      "16 bit instruction register
+OffOut = [OffOut12..OffOut0];          "13 bit offset data from ProgDB
+
+" Constants
+
+" State Encodings - State bus signatures for the 5 states
+STD = [0, 0, 0, 0];                    "Standard - executing single clock instr
+CALL2 = [0, 1, 0, 1];                  "Second cycle of CALL instr
+CALL3 = [1, 0, 0, 1];                  "Third cycle of CALL instr
+CALL4 = [1, 1, 0, 1];                  "Fourth cycle of CALL instr 
+RTS2 = [0, 1, 1, 0];                   "Second cycle of RTS instr 
+RTS3 = [1, 0, 1, 0];                   "Second cycle of RTS instr 
+
+" Instruction Encodings - Unique 16 bit ProgDB Signature for each instr
+
+ADCM = [0, 1, 1, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+ADCX = [0, 1, 1, 0, 0, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+ADCS = [0, 1, 1, 0, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+ADCI = [0, 1, 1, 0, 0, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+ADDM = [0, 1, 1, 0, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+ADDX = [0, 1, 1, 0, 1, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+ADDS = [0, 1, 1, 0, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+ADDI = [0, 1, 1, 0, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+ANDM = [0, 1, 0, 0, 0, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+ANDX = [0, 1, 0, 0, 0, 1, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+ANDS = [0, 1, 0, 0, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+ANDI = [0, 1, 0, 0, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+CMPM = [0, 0, 1, 1, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+CMPX = [0, 0, 1, 1, 0, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+CMPS = [0, 0, 1, 1, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+CMPI = [0, 0, 1, 1, 0, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+DEC = [0, 1, 1, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+INC = [0, 0, 0, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+LSL = [0, 1, 0, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+NEGA = [0, 0, 1, 0, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+NOT = [0, 0, 1, 0, 1, 1, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+ORM = [0, 1, 1, 1, 0, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+ORX = [0, 1, 1, 1, 0, 1, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+ORS = [0, 1, 1, 1, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+ORI = [0, 1, 1, 1, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+RLC = [0, 1, 0, 1, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+SBBM = [0, 0, 0, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+SBBX = [0, 0, 0, 1, 1, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+SBBS = [0, 0, 0, 1, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+SBBI = [0, 0, 0, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+SUBM = [0, 0, 0, 1, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+SUBX = [0, 0, 0, 1, 0, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+SUBS = [0, 0, 0, 1, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+SUBI = [0, 0, 0, 1, 0, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+TSTM = [0, 1, 0, 0, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+TSTX = [0, 1, 0, 0, 1, 1, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+TSTS = [0, 1, 0, 0, 1, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+TSTI = [0, 1, 0, 0, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+XORM = [0, 0, 1, 1, 0, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+XORX = [0, 0, 1, 1, 0, 1, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+XORS = [0, 0, 1, 1, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+XORI = [0, 0, 1, 1, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+TAX = [0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+TXA = [0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1];
+INX = [0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+DEX = [0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+TAS = [0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0];
+TSA = [0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+INS = [0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+DES = [0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+LDI = [1, 0, 0, 0, 1, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+LDDM = [1, 0, 0, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+LDDX = [1, 0, 0, 1, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+LDXPI = [1, 0, 0, 1, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+LDXPD = [1, 0, 0, 1, 1, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+LDXI = [1, 0, 0, 0, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+LDXD = [1, 0, 0, 0, 1, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+LDDS = [1, 0, 0, 1, 0, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+LDSPI = [1, 0, 0, 1, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+LDSPD = [1, 0, 0, 1, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+LDSI = [1, 0, 0, 0, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+LDSD = [1, 0, 0, 0, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+STDM = [1, 0, 1, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+STDX = [1, 0, 1, 1, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+STXPI = [1, 0, 1, 1, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+STXPD = [1, 0, 1, 1, 1, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+STXI = [1, 0, 1, 0, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+STXD = [1, 0, 1, 0, 1, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+STDS = [1, 0, 1, 1, 0, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+STSPI = [1, 0, 1, 1, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+STSPD = [1, 0, 1, 1, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+STSI = [1, 0, 1, 0, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+STSD = [1, 0, 1, 0, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+JMP = [1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 
+       .X., .X.];
+JA = [1, 0, 0, 0, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+JNC = [1, 0, 0, 0, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+JC = [1, 0, 0, 0, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+JBE = [1, 0, 0, 0, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+JZ = [1, 0, 0, 1, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+JG = [1, 0, 1, 0, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+JGE = [1, 0, 1, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+JL = [1, 0, 1, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+JLE = [1, 0, 1, 0, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+JNZ = [1, 0, 0, 1, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+JNS = [1, 0, 0, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+JNV = [1, 0, 1, 0, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X.];
+JS = [1, 0, 0, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+JU = [1, 0, 1, 1, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+JV = [1, 0, 1, 0, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X.];
+POPF = [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+PUSHF = [0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+NOP = [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+CALL = [1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 
+  .X., .X.];
+RTS = [0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+
+EQUATIONS
+
+Status.CLK = Clock;              "Clock for updating Status (state bus)
+IR.CLK = Clock;                  "Instruction Register clock 
+IR.CLR = Reset;                  "Instruction register reset
+IO = 0;                          "IO signal out is always low
+
+OffOut = [IR12..IR0];            "13 bit offset out from instruction
+
+STATE_DIAGRAM Status             "Mealy state machine
+
+STATE CALL2:                     "Control signals for second CALL instr cycle
+  GOTO CALL3 WITH {
+        MuxS2 = 0;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 1;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+        IR := IR;                   "Hold instruction register to keep address 
+  }
+
+STATE CALL3:                       "Control signals for third CALL instr cycle
+  GOTO CALL4 WITH {
+        MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 0;
+	Load = 0;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 1;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+        IR := IR;                  "Hold instruction register to keep address
+  }
+
+STATE CALL4:                       "Control signals for fourth CALL cycle 
+  GOTO STD WITH {
+        MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+        IR := [ProgramDB15..ProgramDB0];  "On clock, set IR to ProgDB
+  }
+
+STATE RTS2:                           "Control signals for second RTS cycle
+  GOTO RTS3 WITH {
+        MuxS2 = 0;
+	MuxS1 = 0;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 1;
+	OffS = 0;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 1;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+        IR := IR;                   "Hold instruction register 
+  }
+
+STATE RTS3:                         "Third RTS instr cycle control signals
+  GOTO STD WITH {
+        MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+        IR := [ProgramDB15..ProgramDB0];    "On clock, set IR to ProgDB
+  }
+
+STATE STD:
+  IF (IR==CALL) THEN CALL2 WITH {      "Control signals for first cycle of CALL
+        MuxS2 = 0;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 1;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+        IR := IR;                    "Hold IR to keep jump address
+  }
+
+  ELSE IF (IR==RTS) THEN RTS2 WITH { "Control signals for first RTS cycle 
+        MuxS2 = 0;
+	MuxS1 = 0;
+	MuxS0 = 0;
+	Load = 0;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 1;
+	OffS = 0;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 1;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+        IR := IR;           "Hold instruction register 
+  }
+
+  ELSE STD WITH { "Control signals for all single clock instructions
+
+IR := [ProgramDB15..ProgramDB0];            "On clock, set IR to ProgDB
+" Set instructions for each control signal:
+
+WHEN (IR == ADCM) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 1;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ADCX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 1;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ADCS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 1;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ADCI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 1;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 1;
+}
+
+WHEN (IR == ADDM) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ADDX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ADDS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ADDI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 1;
+}
+
+WHEN (IR == ANDM) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ANDX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ANDS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ANDI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 1;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 1;
+}
+
+WHEN (IR == CMPM) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == CMPX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == CMPS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == CMPI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 1;
+}
+
+WHEN (IR == DEC) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 1;
+	F1 = 1;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == INC) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LSL) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 1;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == NEGA) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 0;
+	F2 = 0;
+	F1 = 1;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == NOT) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 0;
+	F2 = 0;
+	F1 = 1;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ORM) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 1;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ORX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 1;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ORS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 1;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == ORI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 1;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 1;
+}
+
+WHEN (IR == RLC) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 1;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 1;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == SBBM) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 1;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == SBBX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 1;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == SBBS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 1;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == SBBI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 1;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 1;
+}
+
+WHEN (IR == SUBM) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == SUBX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == SUBS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == SUBI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 1;
+	F1 = 0;
+	F0 = 1;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 1;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 1;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 1;
+}
+
+WHEN (IR == TSTM) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == TSTX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == TSTS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == TSTI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 1;
+}
+
+WHEN (IR == XORM) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 0;
+	F2 = 1;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == XORX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 0;
+	F2 = 1;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == XORS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 1;
+	F3 = 0;
+	F2 = 1;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == XORI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 0;
+	F2 = 1;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 1;
+}
+
+WHEN (IR == TAX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == TXA) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 1;
+	ALUS0 = 0;
+}
+
+WHEN (IR == INX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == DEX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == TAS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == TSA) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 1;
+	ALUS0 = 1;
+}
+
+WHEN (IR == INS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == DES) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LDI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 1;
+}
+
+WHEN (IR == LDDM) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LDDX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LDXPI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 1;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LDXPD) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 1;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LDXI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LDXD) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LDDS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LDSPI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 1;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LDSPD) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 1;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LDSI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == LDSD) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 1;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 0;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == STDM) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == STDX) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == STXPI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 1;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == STXPD) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 1;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == STXI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == STXD) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 1;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 1;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == STDS) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == STSPI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 1;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == STSPD) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 1;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == STSI) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == STSD) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 1;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JMP) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 0;
+	Load = 0;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JA) THEN {
+
+    WHEN([Flags3, Flags0] == [0, 0]) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JNC) THEN {
+
+	WHEN(Flags3 == 0) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JC) THEN {
+
+	WHEN(Flags3 == 1) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JBE) THEN {
+
+	WHEN((Flags3 == 1) # (Flags0 == 1)) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JZ) THEN {
+
+	WHEN(Flags0 == 1) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JG) THEN {
+	WHEN([Flags1, Flags0] == [Flags2, 0]) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JGE) THEN {
+
+	WHEN(Flags1 == Flags2) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JL) THEN {
+
+	WHEN(Flags1 == !Flags2) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JLE) THEN {
+
+	WHEN((Flags1 == !Flags2) # (Flags0 == 1)) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JNZ) THEN {
+
+	WHEN(Flags0 == 0) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JNS) THEN {
+
+	WHEN(Flags1 == 0) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JNV) THEN {
+
+	WHEN(Flags2 == 0) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JS) THEN {
+
+	WHEN(Flags1 == 1) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == JV) THEN {
+
+	WHEN(Flags2 == 1) THEN {
+        MuxS2 = 1;
+	    MuxS1 = 0;
+	    MuxS0 = 0;
+	    Load = 1;
+    }
+    ELSE {
+        MuxS2 = 1;
+        MuxS1 = 1;
+        MuxS0 = 1;
+        Load = 1;
+    }
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == POPF) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 1;
+	OffS = 0;
+	IDS1 = 1;
+	IDS0 = 1;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0;
+	F3 = 1;
+	F2 = 0;
+	F1 = 1;
+	F0 = 0;
+	SZHold = 0;
+	CVHold = 0;
+	CinA = 0;
+	CinB = 0;
+	Popf = 1;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 1;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == PUSHF) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 1;
+	AS0 = 0;
+	PrePostSelect = 0;
+	OffS = 0;
+	IDS1 = 1;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 1;
+	ZAdd = 0; 
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 1;
+	RD = 0;
+	WR = 1;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+
+WHEN (IR == NOP) THEN {
+	MuxS2 = 1;
+	MuxS1 = 1;
+	MuxS0 = 1;
+	Load = 1;
+	AS1 = 0;
+	AS0 = 0;
+	PrePostSelect = 1;
+	OffS = 0;
+	IDS1 = 0;
+	IDS0 = 0;
+	UpdateX = 0;
+	UpdateS = 0;
+	ZAdd = 0;
+	F3 = 0;
+	F2 = 0;
+	F1 = 0;
+	F0 = 0;
+	SZHold = 1;
+	CVHold = 1;
+	CinA = 0;
+	CinB = 0;
+	Popf = 0;
+	AccHold = 1;
+	InvertC = 0;
+	PAUOffS = 0;
+	DDBS1 = 0;
+	DDBS0 = 0;
+	RD = 0;
+	WR = 0;
+	ALUS1 = 0;
+	ALUS0 = 0;
+}
+} "End of State STD
+
+END CU
